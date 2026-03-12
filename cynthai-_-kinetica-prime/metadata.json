@@ -1,5 +1,5 @@
 {
-  "name": "CynthAI | Kinetica Prime",
-  "description": "A futuristic AI assistant powered by Gemini 3 Flash and Firebase Firestore.",
-  "requestFramePermissions": []
+  "name": "CynthAI - Kinetica Prime",
+  "description": "An advanced AI assistant powered by Kinetica Prime Industries, featuring image generation, file analysis, and secure authentication.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"]
 }

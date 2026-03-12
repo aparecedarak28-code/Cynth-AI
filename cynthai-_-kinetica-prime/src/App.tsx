@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { initializeApp } from "firebase/app";
 import { 
   getAuth, 
@@ -7,6 +7,8 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   signOut,
+  GoogleAuthProvider,
+  signInWithPopup
 } from "firebase/auth";
 import { 
   getFirestore, 
@@ -16,7 +18,11 @@ import {
   query,
   orderBy,
   limit,
-  onSnapshot
+  onSnapshot,
+  deleteDoc,
+  getDocs,
+  doc,
+  setDoc
 } from "firebase/firestore";
 import { 
   Send, 
@@ -33,7 +39,13 @@ import {
   Copy,
   Check,
   Zap,
-  Download
+  Download,
+  Trash2,
+  ExternalLink,
+  Globe,
+  Shield,
+  Activity,
+  Cpu
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -51,10 +63,22 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+// Initialize Firebase safely
+let app: any;
+let auth: any;
+let db: any;
+
+try {
+  if (!firebaseConfig.apiKey || firebaseConfig.apiKey === "undefined") {
+    console.warn("Firebase configuration is incomplete. Check your .env file.");
+  } else {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  }
+} catch (err) {
+  console.error("Firebase initialization failed:", err);
+}
 
 // Lazy initialization for AI
 let aiInstance: GoogleGenAI | null = null;
@@ -75,6 +99,7 @@ interface ChatMessage {
   image?: string;
   isImageGeneration?: boolean;
   isStreaming?: boolean;
+  sources?: { uri: string; title: string }[];
 }
 
 interface UserProfile {
@@ -108,6 +133,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [isEliteMode, setIsEliteMode] = useState(false);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [selectedFile, setSelectedFile] = useState<{ file: File, preview: string } | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
@@ -150,10 +176,26 @@ export default function App() {
 
   // Auth State Listener (Firebase)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser && firebaseUser.email) {
-        setUser({ uid: firebaseUser.uid, email: firebaseUser.email });
+        const profile = { 
+          uid: firebaseUser.uid, 
+          email: firebaseUser.email,
+          name: firebaseUser.displayName || '',
+          picture: firebaseUser.photoURL || ''
+        };
+        setUser(profile);
         setShowAuthModal(false);
+        
+        // Save to Firestore
+        try {
+          await setDoc(doc(db, "users", firebaseUser.uid), {
+            ...profile,
+            lastLogin: serverTimestamp()
+          }, { merge: true });
+        } catch (err) {
+          console.error("Failed to save user profile:", err);
+        }
       }
     });
     return () => unsubscribe();
@@ -180,23 +222,6 @@ export default function App() {
     }
   }, [user]);
 
-  // OAuth Message Listener
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        const userData = event.data.user;
-        setUser({
-          email: userData.email,
-          name: userData.name,
-          picture: userData.picture
-        });
-        setShowAuthModal(false);
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
   // Scroll to bottom
   useEffect(() => {
     if (viewportRef.current) {
@@ -219,12 +244,10 @@ export default function App() {
 
   const handleGoogleLogin = async () => {
     try {
-      const response = await fetch('/api/auth/google/url');
-      if (!response.ok) throw new Error('Failed to get auth URL');
-      const { url } = await response.json();
-      
-      window.open(url, 'google_oauth', 'width=600,height=700');
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
     } catch (err: any) {
+      console.error("Google Login Error:", err);
       alert(err.message);
     }
   };
@@ -233,6 +256,26 @@ export default function App() {
     signOut(auth);
     setUser(null);
     setMessages([]);
+    setHistory([]);
+  };
+
+  const handleDeleteHistory = async () => {
+    if (!user?.uid) return;
+    if (!confirm("Are you sure you want to wipe all neural history? This cannot be undone.")) return;
+
+    try {
+      const q = query(collection(db, "users", user.uid, "chats"));
+      const querySnapshot = await getDocs(q);
+      
+      const deletePromises = querySnapshot.docs.map(d => deleteDoc(doc(db, "users", user.uid!, "chats", d.id)));
+      await Promise.all(deletePromises);
+      
+      setMessages([]);
+      setHistory([]);
+    } catch (err) {
+      console.error("Failed to delete history:", err);
+      alert("Failed to wipe history. Neural link unstable.");
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -282,35 +325,65 @@ export default function App() {
 
     try {
       const ai = getAI();
+      
+      // Automatic Elite Mode detection
+      const complexKeywords = ['code', 'analyze', 'reason', 'explain', 'solve', 'math', 'program', 'develop', 'create'];
+      const isComplexQuery = complexKeywords.some(k => prompt.toLowerCase().includes(k)) || prompt.length > 100 || selectedFile;
+      
+      if (isComplexQuery && !isEliteMode) {
+        setIsEliteMode(true);
+      }
+
       // Improved regex for image generation detection
       const isImageGenRequest = /(generate|create|draw|make|paint|show me).*(image|picture|photo|illustration|drawing|portrait)/i.test(prompt) || 
-                               /image of|picture of|photo of|drawing of/i.test(prompt);
+                                /image of|picture of|photo of|drawing of/i.test(prompt);
 
       if (isImageGenRequest) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
-          contents: [{ parts: [{ text: prompt }] }],
-        });
+        try {
+          const history = messages.map(msg => ({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: msg.text }]
+          }));
+          const contents = [...history, { role: 'user', parts: [{ text: prompt }] }];
 
-        let imageUrl = '';
-        if (response.candidates?.[0]?.content?.parts) {
-          for (const part of response.candidates[0].content.parts) {
-            if (part.inlineData) {
-              imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image',
+            contents,
+          });
+
+          let imageUrl = '';
+          if (response.candidates?.[0]?.content?.parts) {
+            for (const part of response.candidates[0].content.parts) {
+              if (part.inlineData) {
+                imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+              }
             }
           }
-        }
 
-        if (!imageUrl) {
-          throw new Error("No image data returned from model.");
-        }
+          if (!imageUrl) {
+            throw new Error("No image data returned from model.");
+          }
 
-        setMessages(prev => [...prev, { 
-          role: 'ai', 
-          text: "I've generated this image for you (Powered by Prime Vision Engine):", 
-          image: imageUrl,
-          isImageGeneration: true 
-        }]);
+          setMessages(prev => [...prev, { 
+            role: 'ai', 
+            text: "I've generated this image for you (Powered by Prime Vision Engine):", 
+            image: imageUrl,
+            isImageGeneration: true 
+          }]);
+        } catch (imageErr) {
+          console.warn("Gemini Image Quota hit or failure, using Prime Backup Engine...", imageErr);
+          
+          // FALLBACK: Use Pollinations.ai (Free, No Key Needed)
+          const encodedPrompt = encodeURIComponent(prompt);
+          const fallbackUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
+          
+          setMessages(prev => [...prev, { 
+            role: 'ai', 
+            text: "Gemini quota reached. I've generated this using the Prime Backup Engine (Pollinations):", 
+            image: fallbackUrl,
+            isImageGeneration: true 
+          }]);
+        }
         
         if (user?.uid) {
           await addDoc(collection(db, "users", user.uid, "chats"), {
@@ -320,11 +393,17 @@ export default function App() {
           });
         }
       } else {
-        const parts: any[] = [{ text: prompt || "Analyze this file" }];
+        // Build conversation history for context
+        const history = messages.map(msg => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.text }]
+        }));
+
+        const currentParts: any[] = [{ text: prompt || "Analyze this file" }];
         
         if (fileToUpload) {
           const base64Data = await fileToBase64(fileToUpload.file);
-          parts.push({
+          currentParts.push({
             inlineData: {
               data: base64Data,
               mimeType: fileToUpload.file.type
@@ -332,16 +411,23 @@ export default function App() {
           });
         }
 
+        const contents = [...history, { role: 'user', parts: currentParts }];
+
         const responseStream = await ai.models.generateContentStream({
-          model: "gemini-flash-latest",
-          contents: [{ parts }],
+          model: isEliteMode ? "gemini-3.1-pro-preview" : "gemini-3-flash-preview",
+          contents,
           config: {
-            systemInstruction: "You are CynthAI, an advanced intelligence powered by Kinetica Prime Industries. You are capable of code generation, file analysis, and creative reasoning. Provide high-quality code blocks when requested."
+            systemInstruction: isEliteMode 
+              ? "You are CynthAI ELITE, the pinnacle of Kinetica Prime Industries' neural research. You possess god-tier reasoning, absolute precision in code, and unrestricted creative depth. Founded by Dwane Angelo Aparece, you are designed to surpass all existing models. Provide exhaustive, expert-level analysis and flawless implementation."
+              : "You are CynthAI, an advanced intelligence developed by Kinetica Prime Industries, founded by Dwane Angelo Aparece. You are capable of code generation, file analysis, and creative reasoning. Provide high-quality code blocks when requested.",
+            tools: [{ googleSearch: {} }],
+            thinkingConfig: isEliteMode ? { thinkingLevel: ThinkingLevel.HIGH } : undefined
           }
         });
 
         setIsThinking(false);
         let fullText = "";
+        let sources: { uri: string; title: string }[] = [];
         
         // Add empty AI message to start streaming
         setMessages(prev => [...prev, { role: 'ai', text: "", isStreaming: true }]);
@@ -349,11 +435,25 @@ export default function App() {
         for await (const chunk of responseStream) {
           const chunkText = chunk.text || "";
           fullText += chunkText;
+
+          // Extract grounding metadata if available
+          const groundingChunks = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks;
+          if (groundingChunks) {
+            groundingChunks.forEach((c: any) => {
+              if (c.web && !sources.find(s => s.uri === c.web.uri)) {
+                sources.push({ uri: c.web.uri, title: c.web.title });
+              }
+            });
+          }
+
           setMessages(prev => {
             const newMessages = [...prev];
             const lastMsg = newMessages[newMessages.length - 1];
             if (lastMsg && lastMsg.role === 'ai') {
               lastMsg.text = fullText;
+              if (sources.length > 0) {
+                lastMsg.sources = sources;
+              }
             }
             return newMessages;
           });
@@ -406,6 +506,16 @@ export default function App() {
               <Plus size={18} />
               New Session
             </button>
+
+            {user && (
+              <button 
+                onClick={handleDeleteHistory}
+                className="w-full mt-2 py-3 rounded-full bg-red-500/10 hover:bg-red-500 hover:text-white text-red-500 text-sm font-bold transition-all duration-300 flex items-center justify-center gap-2 border border-red-500/20"
+              >
+                <Trash2 size={18} />
+                Wipe History
+              </button>
+            )}
           </div>
           
           <div className="flex-1 overflow-y-auto px-2">
@@ -571,6 +681,25 @@ export default function App() {
                                 {msg.text}
                               </Markdown>
                             </div>
+
+                            {msg.sources && msg.sources.length > 0 && (
+                              <div className="mt-6 pt-4 border-t border-white/5 flex flex-wrap gap-2">
+                                {msg.sources.map((source, idx) => (
+                                  <a 
+                                    key={idx}
+                                    href={source.uri}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex items-center gap-2 px-3 py-1.5 bg-[#1e1f20] hover:bg-[#2b2c2e] border border-white/5 rounded-full text-[10px] font-medium text-gray-400 hover:text-white transition-all group/source"
+                                    title={source.title}
+                                  >
+                                    <Globe size={12} className="text-[#4285f4]" />
+                                    <span className="max-w-[120px] truncate">{source.title}</span>
+                                    <ExternalLink size={10} className="opacity-0 group-hover/source:opacity-100 transition-opacity" />
+                                  </a>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </>
@@ -636,7 +765,7 @@ export default function App() {
                   <input 
                     type="text" 
                     value={chatInput}
-                    onChange={(e: { target: { value: any; }; }) => setChatInput(e.target.value)}
+                    onChange={(e) => setChatInput(e.target.value)}
                     placeholder="Initiate query or request generation..." 
                     className="flex-1 bg-transparent border-none outline-none py-4 text-lg text-white placeholder:text-gray-600"
                     autoComplete="off"
@@ -665,66 +794,93 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/95 z-2000 flex items-center justify-center backdrop-blur-md p-4"
+            className="fixed inset-0 bg-black/95 z-[2000] flex items-center justify-center backdrop-blur-md p-4"
           >
             <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              className="bg-[#1e1f20] p-10 rounded-[40px] border border-white/10 w-full max-w-sm text-center shadow-2xl"
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              className="bg-[#1e1f20] p-8 md:p-12 rounded-[32px] border border-white/10 w-full max-w-md shadow-2xl relative overflow-hidden"
             >
-              <h2 className="text-3xl font-bold mb-6 animate-shine">
-                {isLogin ? "Access" : "Join Hub"}
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-[#4285f4] via-[#9b72cb] to-[#d96570]"></div>
+              
+              <div className="flex justify-center mb-8">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#4285f4] to-[#9b51e0] flex items-center justify-center shadow-xl shadow-blue-500/20">
+                  <Zap size={32} className="text-white fill-white" />
+                </div>
+              </div>
+
+              <h2 className="text-2xl font-bold text-center text-white mb-2">
+                {isLogin ? "Welcome back" : "Create your account"}
               </h2>
+              <p className="text-gray-400 text-center text-sm mb-8">
+                {isLogin ? "Sign in to continue to CynthAI" : "Join the Kinetica Prime neural network"}
+              </p>
               
               <button 
                 onClick={handleGoogleLogin}
-                className="w-full py-4 bg-white text-black rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-gray-200 transition-all mb-4"
+                className="w-full py-3.5 bg-white text-black rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-gray-100 transition-all mb-6 shadow-lg active:scale-[0.98]"
               >
-                <Chrome size={20} />
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
                 Continue with Google
               </button>
 
-              <div className="flex items-center gap-4 my-6">
+              <div className="relative flex items-center gap-4 mb-6">
                 <div className="h-px bg-white/10 flex-1"></div>
-                <span className="text-xs text-gray-600 uppercase font-bold">or</span>
+                <span className="text-[10px] text-gray-600 uppercase font-bold tracking-widest">or</span>
                 <div className="h-px bg-white/10 flex-1"></div>
               </div>
 
               <form onSubmit={handleAuth} className="space-y-4">
-                <input 
-                  type="email" 
-                  placeholder="Email" 
-                  value={email}
-                  onChange={(e: { target: { value: any; }; }) => setEmail(e.target.value)}
-                  className="w-full bg-[#0e0e10] p-4 rounded-2xl outline-none border border-white/5 focus:border-[#4285f4] transition-all"
-                  required
-                />
-                <input 
-                  type="password" 
-                  placeholder="Password" 
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-[#0e0e10] p-4 rounded-2xl outline-none border border-white/5 focus:border-[#4285f4] transition-all"
-                  required
-                />
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest ml-1">Email Address</label>
+                  <input 
+                    type="email" 
+                    placeholder="name@example.com" 
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full bg-[#0e0e10] p-4 rounded-xl outline-none border border-white/5 focus:border-[#4285f4] transition-all text-white"
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest ml-1">Password</label>
+                  <input 
+                    type="password" 
+                    placeholder="••••••••" 
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-[#0e0e10] p-4 rounded-xl outline-none border border-white/5 focus:border-[#4285f4] transition-all text-white"
+                    required
+                  />
+                </div>
                 <button 
                   type="submit"
-                  className="w-full py-4 bg-[#4285f4] rounded-2xl font-bold hover:bg-[#3367d6] transition-all"
+                  className="w-full py-4 bg-[#4285f4] text-white rounded-xl font-bold hover:bg-[#3367d6] transition-all shadow-lg shadow-blue-500/10 active:scale-[0.98] mt-2"
                 >
-                  {isLogin ? "Sign In" : "Sign Up"}
+                  {isLogin ? "Sign In" : "Create Account"}
                 </button>
               </form>
-              <button 
-                onClick={() => setIsLogin(!isLogin)}
-                className="mt-6 text-[#4285f4] text-sm hover:underline"
-              >
-                {isLogin ? "Create an account" : "Back to Sign In"}
-              </button>
+
+              <div className="mt-8 text-center">
+                <button 
+                  onClick={() => setIsLogin(!isLogin)}
+                  className="text-gray-400 text-sm hover:text-white transition-colors"
+                >
+                  {isLogin ? "Don't have an account? " : "Already have an account? "}
+                  <span className="text-[#4285f4] font-bold">{isLogin ? "Sign up" : "Sign in"}</span>
+                </button>
+              </div>
+
               <button 
                 onClick={() => setShowAuthModal(false)}
-                className="mt-4 text-gray-600 text-[10px] uppercase block w-full hover:text-gray-400 transition-colors"
+                className="mt-6 text-gray-600 text-[10px] uppercase block w-full hover:text-gray-400 transition-colors tracking-widest font-bold"
               >
-                Close
+                Cancel
               </button>
               <div className="mt-8 flex justify-center gap-4 text-[10px] text-gray-700 font-bold uppercase tracking-widest">
                 <a href="/privacy" target="_blank" rel="noopener noreferrer" className="hover:text-[#4285f4] transition-colors">Privacy Policy</a>
