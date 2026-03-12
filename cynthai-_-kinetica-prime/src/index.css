@@ -1,0 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Google Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer utilities {
+  .animate-shine {
+    background: linear-gradient(90deg, #4285f4, #9b72cb, #d96570, #f4af5f, #4285f4);
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shine 5s linear infinite;
+  }
+
+  .animate-spin-slow {
+    animation: spin 8s linear infinite;
+  }
+}
+
+@keyframes shine {
+  to {
+    background-position: 200% center;
+  }
+}
+
+.markdown-body {
+  @apply text-gray-200 leading-relaxed;
+}
+
+.markdown-body p {
+  @apply mb-4;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  @apply font-bold mt-6 mb-4 text-white;
+}
+
+.markdown-body ul, .markdown-body ol {
+  @apply ml-6 mb-4 list-disc;
+}
+
+.markdown-body code:not(pre code) {
+  @apply bg-[#2b2c2e] px-1.5 py-0.5 rounded text-[#4285f4] font-mono text-sm;
+}
