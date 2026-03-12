@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
+// @ts-ignore
+const ThinkingLevel = { HIGH: 'HIGH', LOW: 'LOW' };
 import { initializeApp } from "firebase/app";
 import { 
   getAuth, 
@@ -47,11 +49,11 @@ import {
   Activity,
   Cpu
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import atomDark from 'react-syntax-highlighter/dist/esm/styles/prism/atom-dark';
 
 // Firebase Configuration
 const firebaseConfig = { 
@@ -124,6 +126,7 @@ const GeminiIcon = ({ isThinking }: { isThinking: boolean }) => (
 );
 
 export default function App() {
+  console.log("CynthAI App Rendering...");
   const [user, setUser] = useState<UserProfile | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -149,6 +152,12 @@ export default function App() {
     };
     window.addEventListener('mousemove', handleMouseMove);
     
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+    };
+  }, []);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -169,13 +178,13 @@ export default function App() {
     render();
 
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
       cancelAnimationFrame(animationFrameId);
     };
   }, [mousePos]);
 
   // Auth State Listener (Firebase)
   useEffect(() => {
+    if (!auth) return;
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser && firebaseUser.email) {
         const profile = { 
@@ -203,7 +212,7 @@ export default function App() {
 
   // Load History from Firestore
   useEffect(() => {
-    if (user?.uid) {
+    if (user?.uid && db) {
       const q = query(
         collection(db, "users", user.uid, "chats"), 
         orderBy("timestamp", "desc"), 
@@ -231,6 +240,10 @@ export default function App() {
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!auth) {
+      alert("Firebase Auth is not initialized. Please check your configuration.");
+      return;
+    }
     try {
       if (isLogin) {
         await signInWithEmailAndPassword(auth, email, password);
@@ -243,6 +256,10 @@ export default function App() {
   };
 
   const handleGoogleLogin = async () => {
+    if (!auth) {
+      alert("Firebase Auth is not initialized. Please check your configuration.");
+      return;
+    }
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
@@ -253,14 +270,14 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    signOut(auth);
+    if (auth) signOut(auth);
     setUser(null);
     setMessages([]);
     setHistory([]);
   };
 
   const handleDeleteHistory = async () => {
-    if (!user?.uid) return;
+    if (!user?.uid || !db) return;
     if (!confirm("Are you sure you want to wipe all neural history? This cannot be undone.")) return;
 
     try {
