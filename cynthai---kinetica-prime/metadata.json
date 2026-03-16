@@ -1,0 +1,5 @@
+{
+  "name": "CynthAI - Kinetica Prime",
+  "description": "An advanced AI assistant powered by Kinetica Prime Industries, featuring image generation, file analysis, and secure authentication.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"]
+}
